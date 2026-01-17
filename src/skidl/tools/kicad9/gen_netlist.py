@@ -69,26 +69,28 @@ def gen_sheetpath_tstamp(hierarchy):
 
     This function creates a unique timestamp for a hierarchical path
     in a KiCad project. If the hierarchy is empty, the timestamp
-    will be "/". Otherwise, it generates a UUID for each
-    entry of the tuple and combines them into a single timestamp.
+    will be the root UUID. Otherwise, it generates a UUID for each
+    entry of the tuple (including the root) and combines them into a
+    single timestamp.
 
     Args:
         hierarchy (tuple): A tuple of strings with the name of each level
             of the hierarchy.
 
     Returns:
-        str: A timestamp for the sheetpath. For the root path, it returns "/".
-             For other paths, it returns a UUID-based timestamp in the format
-             "/<UUID>/<UUID>/.../<UUID>/", where each UUID corresponds to a
-             segment of the sheetpath.
+        str: A timestamp for the sheetpath. For the root path, it returns a
+             UUID-based timestamp in the format "/<UUID>/". For other paths,
+             it returns "/<UUID>/<UUID>/.../<UUID>/", where each UUID
+             corresponds to a segment of the sheetpath starting at the root.
     """
 
     assert hierarchy[0] == "", "Top level of hierarchy must be an empty string."
+    root_uuid = str(uuid.uuid5(namespace_uuid, "/"))
     if len(hierarchy) == 1:
-        tstamp = "/"
+        tstamp = "/" + root_uuid + "/"
     else:
         tstamp = "/".join(
-            [str(uuid.uuid5(namespace_uuid, level)) for level in hierarchy[1:]]
+            [root_uuid] + [str(uuid.uuid5(namespace_uuid, level)) for level in hierarchy[1:]]
         )
         tstamp = "/" + tstamp + "/"
     return tstamp

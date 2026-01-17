@@ -216,12 +216,14 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
 
         instance_path = "/" + "/".join(path_uuids)
 
+    unit_num = getattr(part, "num", 1)
+
     # Create symbol as nested list
     symbol_list = [
         "symbol",
         ["lib_id", f"{lib_name}:{part_name}"],
         ["at", pos_x, pos_y, 0],
-        ["unit", 1],
+        ["unit", unit_num],
         ["exclude_from_sim", "no"],
         ["in_bom", "yes"],
         ["on_board", "yes"],
@@ -306,7 +308,7 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
             ["project", "SKiDL-Generated",
                 ["path", instance_path,
                     ["reference", part.ref],
-                    ["unit", 1]
+                    ["unit", unit_num]
                 ]
             ]
         ]
@@ -430,7 +432,12 @@ def group_parts_by_hierarchy(circuit):
             path_components = [level for level in part.hiertuple[1:] if level]
 
             if path_components:
-                # Create path string like "power" or "power/regulators" or "power/regulators/ldo"
+                # Ensure parent levels exist even when they contain no parts.
+                for i in range(1, len(path_components) + 1):
+                    level_path = "/".join(path_components[:i])
+                    hierarchy_groups.setdefault(level_path, [])
+
+                # Create path string like "power" or "power/regulators" or "power/regulators/ldo".
                 node_path = "/".join(path_components)
             else:
                 # Root level part
@@ -777,14 +784,16 @@ def gen_schematic(
     from skidl.logger import active_logger
 
     def need_quote(x):
-        match x[0]:
-            case "title" | "date" | "company" | "comment" | "path" | "project" | "property" | "name" | "number" | "lib_id" | "reference": return True
-            case _: return False
+        key = x[0] if x else None
+        if key in ("title", "date", "company", "comment", "path", "project", "property", "name", "number", "lib_id", "reference"):
+            return True
+        return False
 
     def need_quote_alternate(x):
-        match x[0]:
-            case "alternate": return True
-            case _: return False
+        key = x[0] if x else None
+        if key == "alternate":
+            return True
+        return False
 
     try:
         # Create output filename

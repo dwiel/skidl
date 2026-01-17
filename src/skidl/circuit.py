@@ -1256,12 +1256,12 @@ class Circuit(SkidlBaseObject):
                 )
 
             if detect_os() == "Windows":
-                subprocess.Popen(
+                subprocess.run(
                     ["netlistsvg.cmd", json_file, "--skin", skin_file, "-o", svg_file],
                     shell=False,
                 )
             else:
-                subprocess.Popen(
+                subprocess.run(
                     ["netlistsvg", json_file, "--skin", skin_file, "-o", svg_file],
                     shell=False,
                 )
@@ -1304,7 +1304,7 @@ class Circuit(SkidlBaseObject):
             # Supply a nonsense footprint just so no complaints are raised when the EESCHEMA code is generated.
             part.footprint = ":"
 
-        if kwargs.get("empty_footprint_handler]"):
+        if kwargs.get("empty_footprint_handler"):
             skidl.empty_footprint_handler = kwargs["empty_footprint_handler"]
         else:
             skidl.empty_footprint_handler = _empty_footprint_handler
@@ -1313,6 +1313,10 @@ class Circuit(SkidlBaseObject):
         self.merge_nets() # Merge nets or schematic routing will fail.
 
         tool = kwargs.pop("tool", skidl.config.tool)
+
+        # Map file_ to filepath for gen_schematic compatibility.
+        if "file_" in kwargs:
+            kwargs["filepath"] = kwargs.pop("file_")
 
         try:
             tool_modules[tool].gen_schematic(self, **kwargs)

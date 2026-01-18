@@ -2328,17 +2328,29 @@ class Router:
         # Globally route each net.
         global_routes = []
 
+        def face_sort_key(face):
+            """Return a stable sort key for deterministic routing start points."""
+            return (
+                face.track.orientation,
+                face.track.coord,
+                face.track.idx,
+                face.beg.coord,
+                face.beg.idx,
+                face.end.coord,
+                face.end.idx,
+            )
+
         for net in nets:
             # List for storing GlobalWires connecting pins on net.
             global_route = GlobalRoute()
 
             # Faces with pins from which paths/routing originate.
             net_pin_faces = {pin.face for pin in node.get_internal_pins(net)}
-            start_faces = set(net_pin_faces)
+            start_faces = sorted(net_pin_faces, key=face_sort_key)
 
             # Select a random start face and look for a route to *any* of the other start faces.
-            start_face = random.choice(list(start_faces))
-            start_faces.discard(start_face)
+            start_face = random.choice(start_faces)
+            start_faces = [face for face in start_faces if face is not start_face]
             stop_faces = set(start_faces)
             initial_route = rt_srch(start_face, stop_faces)
             global_route.append(initial_route)
@@ -3047,6 +3059,11 @@ class Router:
 
                 # Merge segments made colinear by removing jogs.
                 segments = merge_segments(segments)
+
+                # Re-split after final merge so pins remain wire endpoints.
+                order_seg_points(segments)
+                segments = split_segments(segments, net_pin_pts[net])
+                segments = [seg for seg in segments if seg.p1 != seg.p2]
 
                 # Update the node net's wire with the cleaned version.
                 node.wires[net] = segments

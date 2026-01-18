@@ -24,7 +24,12 @@ class NetTerminal(Part):
         # Create a Part.
         from skidl import SKIDL
 
-        super().__init__(name="NT", ref_prefix="NT", tool=SKIDL)
+        super().__init__(
+            name="NT",
+            ref_prefix="NT",
+            tool=SKIDL,
+            circuit=net.circuit,
+        )
 
         # Set a default transformation matrix for this part.
         self.tx = Tx()

@@ -666,9 +666,9 @@ def preprocess_circuit(circuit, **options):
                 if isinstance(pin.orientation, (int, float)):
                     pin.orientation = {
                         0: "R",
-                        90: "D",
+                        90: "U",
                         180: "L",
-                        270: "U",
+                        270: "D",
                     }.get(pin.orientation, pin.orientation)
                 pin.routed = False
 

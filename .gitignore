@@ -59,6 +59,9 @@ cover/
 docsrc/sphinx/rst_output/
 tests/test_data/skywater/
 tests/test_data/schematic_output/
+test_parser_1/
+tests/test_parser_1/
+tests/storage/
 tests/examples/arduino_uno_r3_from_scratch/
 tests/examples/*/*.sch
 tests/examples/*/*.sch-bak

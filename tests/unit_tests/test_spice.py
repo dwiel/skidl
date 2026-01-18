@@ -3,6 +3,7 @@
 # The MIT License (MIT) - Copyright (c) Dave Vandenbout.
 
 import os
+import sys
 import pytest
 
 # Skip entire module unless default tool is KICAD5.
@@ -30,11 +31,18 @@ except ModuleNotFoundError:
 from skidl import *
 from skidl.pyspice import *
 
+# Add test data SpiceLib to search paths (tests run from tests/ directory)
+lib_search_paths[SPICE].extend([
+    "test_data/SpiceLib",
+    "test_data/SpiceLib/lib",
+    "test_data/SpiceLib/sym",
+])
 
 show_plots = False
 
 
 @pytest.mark.spice
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="InSpice requires Python 3.12+ for Path.walk()")
 def test_lib_import_1():
     lib = SchLib("lt1083", tool=SPICE)
     assert len(lib) > 0
@@ -59,6 +67,7 @@ def test_lib_export_1():
 
 
 @pytest.mark.spice
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="InSpice requires Python 3.12+ for Path.walk()")
 def test_xspice_1():
     set_default_tool(SPICE)
     # Component declarations showing various XSPICE styles.
@@ -128,6 +137,7 @@ def test_xspice_1():
 
 
 @pytest.mark.spice
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="InSpice requires Python 3.12+ for Path.walk()")
 def test_part_convert_for_spice():
 
     vcc = Part("Device", "Battery", value=5 @ u_V)
@@ -163,6 +173,7 @@ def test_part_convert_for_spice():
 
 
 @pytest.mark.spice
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="InSpice requires Python 3.12+ for Path.walk()")
 def test_subcircuit_1():
     global gnd
 
@@ -208,6 +219,7 @@ def test_subcircuit_1():
 
 
 @pytest.mark.spice
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="InSpice requires Python 3.12+ for Path.walk()")
 def test_model_1():
     reset()
     set_default_tool(SPICE)
@@ -279,6 +291,7 @@ def test_model_1():
 
 
 @pytest.mark.spice
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="InSpice requires Python 3.12+ for Path.walk()")
 def test_all_parts():
 
     ###############################################################################
@@ -750,7 +763,7 @@ def test_all_parts():
 
 
 @pytest.mark.spice
-# @pytest.mark.xfail(raises=(FileNotFoundError))
+@pytest.mark.skip(reason="Requires external Skywater PDK (sky130.lib.spice)")
 def test_skywater_1():
 
     reset()
@@ -1015,7 +1028,7 @@ def test_skywater_1():
     oscope(waveforms, clk, *cnt)
 
 @pytest.mark.spice
-# @pytest.mark.xfail(raises=(FileNotFoundError))
+@pytest.mark.skip(reason="Requires external Skywater PDK (sky130.lib.spice)")
 def test_skywater_2():
 
     reset()

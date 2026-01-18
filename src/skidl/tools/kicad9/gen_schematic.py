@@ -1342,3 +1342,8 @@ def gen_schematic(
     except Exception as e:
         active_logger.error(f"Error generating KiCad 9 schematic: {str(e)}")
         raise
+
+
+# Allow callers that import gen_schematic as a function to access helpers.
+gen_schematic.preprocess_circuit = preprocess_circuit
+gen_schematic.finalize_parts_and_nets = finalize_parts_and_nets

@@ -11,7 +11,7 @@ points/vectors, transformation matrices, and unit conversions between millimeter
 and thousandths-of-inch (mils).
 """
 
-from math import sqrt, sin, cos, radians
+from math import sqrt, sin, cos, radians, floor, ceil
 from copy import copy
 
 from .utilities import export_to_all
@@ -178,6 +178,27 @@ class Tx:
             dx=self.dx * tx.a + self.dy * tx.c + tx.dx,
             dy=self.dx * tx.b + self.dy * tx.d + tx.dy,
         )
+
+    def inverse(self):
+        """
+        Return the inverse transformation.
+
+        Returns:
+            Tx: A new transformation matrix that reverses this transformation.
+
+        Raises:
+            ValueError: If the transformation matrix is singular.
+        """
+        det = self.a * self.d - self.b * self.c
+        if det == 0:
+            raise ValueError("Singular transformation cannot be inverted.")
+        inv_a = self.d / det
+        inv_b = -self.b / det
+        inv_c = -self.c / det
+        inv_d = self.a / det
+        inv_dx = -(inv_a * self.dx + inv_c * self.dy)
+        inv_dy = -(inv_b * self.dx + inv_d * self.dy)
+        return Tx(inv_a, inv_b, inv_c, inv_d, inv_dx, inv_dy)
 
     @property
     def origin(self):
@@ -737,6 +758,29 @@ class BBox:
         bbox.min = bbox.min.snap(grid_spacing)
         bbox.max = bbox.max.snap(grid_spacing)
         return bbox
+
+    def snap_outward(self, grid_spacing):
+        """
+        Expand the bounding box to the nearest grid lines that fully contain it.
+
+        Args:
+            grid_spacing (float): Grid spacing to align to.
+
+        Returns:
+            BBox: A new bounding box with outward grid-aligned corners.
+        """
+        def snap_min(value):
+            value = round(value, 6)
+            return int(floor(value / grid_spacing)) * grid_spacing
+
+        def snap_max(value):
+            value = round(value, 6)
+            return int(ceil(value / grid_spacing)) * grid_spacing
+
+        return BBox(
+            Point(snap_min(self.min.x), snap_min(self.min.y)),
+            Point(snap_max(self.max.x), snap_max(self.max.y)),
+        )
 
     @property
     def area(self):

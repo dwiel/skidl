@@ -139,6 +139,18 @@ boundary = Boundary()
 pin_pts = []
 
 
+def _get_route_bbox(part):
+    route_bbox = getattr(part, "route_bbox", None)
+    if route_bbox is not None:
+        return route_bbox
+
+    abs_bbox = part.lbl_bbox * part.tx
+    abs_bbox = abs_bbox.snap_outward(GRID)
+    route_bbox = abs_bbox * part.tx.inverse()
+    part.route_bbox = route_bbox
+    return route_bbox
+
+
 class Terminal:
     def __init__(self, net, face, coord):
         """Terminal on a Face from which a net is routed within a SwitchBox.
@@ -2022,7 +2034,7 @@ class Router:
         def add_routing_pt(pin):
             """Add the point for a pin on the boundary of a part."""
 
-            bbox = pin.part.lbl_bbox
+            bbox = _get_route_bbox(pin.part)
             pin.route_pt = copy.copy(pin.pt)
             if pin.orientation == "U":
                 # Pin points up, so extend downward to the bottom of the bounding box.
@@ -2065,7 +2077,7 @@ class Router:
 
         # The top/bottom/left/right of each part's labeled bounding box define the H/V tracks.
         for part in node.parts:
-            bbox = (part.lbl_bbox * part.tx).round()
+            bbox = (_get_route_bbox(part) * part.tx).round()
             v_track_coord.append(bbox.min.x)
             v_track_coord.append(bbox.max.x)
             h_track_coord.append(bbox.min.y)
@@ -2112,7 +2124,7 @@ class Router:
 
         # Add routing box faces for each side of a part's labeled bounding box.
         for part in node.parts:
-            part_bbox = (part.lbl_bbox * part.tx).round()
+            part_bbox = (_get_route_bbox(part) * part.tx).round()
             bbox_to_faces(part, part_bbox)
 
         # Add routing box faces for each side of the expanded bounding box surrounding all parts.
@@ -3119,7 +3131,10 @@ class Router:
     def rmv_routing_stuff(node):
         """Remove attributes added to parts/pins during routing."""
 
-        rmv_attr(node.parts, ("left_track", "right_track", "top_track", "bottom_track"))
+        rmv_attr(
+            node.parts,
+            ("left_track", "right_track", "top_track", "bottom_track", "route_bbox"),
+        )
         for part in node.parts:
             rmv_attr(part.pins, ("route_pt", "face"))
 
@@ -3176,7 +3191,7 @@ class Router:
             channel_sz = (len(internal_nets) + 1) * GRID
             routing_bbox = (
                 node.internal_bbox().resize(Vector(channel_sz, channel_sz))
-            ).round()
+            ).snap_outward(GRID)
 
             # Create horizontal & vertical global routing tracks and faces.
             h_tracks, v_tracks = node.create_routing_tracks(routing_bbox)

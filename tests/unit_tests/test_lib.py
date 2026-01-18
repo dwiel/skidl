@@ -188,7 +188,7 @@ def test_lib_1():
     # Import the KiCad library.
     lib_kicad = SchLib("Device")
     # Export the library.
-    lib_kicad.export("Device")
+    lib_kicad.export("./Device")
     # Reset the library.
     SchLib.reset()
     # Import the exported library.

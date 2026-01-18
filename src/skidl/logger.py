@@ -86,14 +86,15 @@ class SkidlLogFileHandler(logging.FileHandler):
     def remove_log_file(self):
         """
         Close and remove the log file associated with this handler.
-        
+
         If the file doesn't exist or can't be removed, the filename is set to None.
         """
         if self.filename:
             # Close file handle before removing file.
             f_name = self.filename
             self.close()
-            os.remove(f_name)
+            if os.path.exists(f_name):
+                os.remove(f_name)
         self.filename = None
 
 

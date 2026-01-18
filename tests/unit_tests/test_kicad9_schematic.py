@@ -250,6 +250,32 @@ def test_kicad9_schematic_wires_basic(tmp_path):
         skidl.config.pickle_dir = orig_pickle_dir
 
 
+def test_kicad9_schematic_file_path(tmp_path):
+    orig_pickle_dir = _setup_kicad9_libs(tmp_path)
+    try:
+        default_circuit.reset()
+
+        r = Part("Device", "R", dest=TEMPLATE)
+        r1 = r()
+        r2 = r()
+        net = Net("NET")
+        net += r1[1], r2[1]
+
+        sch_path = tmp_path / "file_path.kicad_sch"
+        generate_schematic(
+            file_=str(sch_path),
+            flatness=1.0,
+            retries=1,
+            seed=1,
+        )
+
+        assert sch_path.exists()
+        text = sch_path.read_text()
+        assert "kicad_sch" in text
+    finally:
+        skidl.config.pickle_dir = orig_pickle_dir
+
+
 def test_kicad9_pin_orientation_mapping(tmp_path):
     orig_pickle_dir = _setup_kicad9_libs(tmp_path)
     kicad9_gen = None

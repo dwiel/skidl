@@ -15,6 +15,7 @@ import builtins
 import json
 import subprocess
 from collections import Counter, deque
+from pathlib import Path
 
 import graphviz
 
@@ -1314,9 +1315,20 @@ class Circuit(SkidlBaseObject):
 
         tool = kwargs.pop("tool", skidl.config.tool)
 
-        # Map file_ to filepath for gen_schematic compatibility.
+        # Map file_ to filepath/top_name for gen_schematic compatibility.
         if "file_" in kwargs:
-            kwargs["filepath"] = kwargs.pop("file_")
+            file_ = kwargs.pop("file_")
+            file_path = Path(file_)
+            if file_path.is_dir():
+                kwargs["filepath"] = str(file_path)
+            else:
+                suffix = file_path.suffix.lower()
+                if suffix in (".kicad_sch", ".sch"):
+                    parent = str(file_path.parent)
+                    kwargs["filepath"] = parent if parent else "."
+                    kwargs.setdefault("top_name", file_path.stem)
+                else:
+                    kwargs["filepath"] = file_
 
         try:
             tool_modules[tool].gen_schematic(self, **kwargs)

@@ -223,32 +223,158 @@ def _load_library_symbols(lib_path):
     return symbols
 
 
-def _collect_symbol_defs_with_extends(symbols, symbol_name, lib_name, seen=None):
+def _rename_unit_symbol_name(unit_name, parent_name, child_name):
+    if unit_name == parent_name:
+        return child_name
+    prefix = f"{parent_name}_"
+    if unit_name.startswith(prefix):
+        return child_name + unit_name[len(parent_name):]
+    return unit_name
+
+
+def _resolve_symbol_with_extends(symbols, symbol_name, seen=None):
     if seen is None:
         seen = set()
     if symbol_name in seen:
-        return []
-
+        return None
     symbol = symbols.get(symbol_name)
     if not symbol:
-        return []
+        return None
 
+    seen.add(symbol_name)
     symbol_copy = copy.deepcopy(symbol)
     parent_name = None
-    for item in symbol_copy:
-        if isinstance(item, list) and item and item[0].lower() == "extends":
+    extends_idx = None
+    for idx, item in enumerate(symbol_copy):
+        if isinstance(item, list) and item and str(item[0]).lower() == "extends":
             parent_name = item[1]
-            item[1] = f"{lib_name}:{item[1]}"
+            extends_idx = idx
             break
 
-    defs = []
-    if parent_name:
-        defs.extend(_collect_symbol_defs_with_extends(symbols, parent_name, lib_name, seen))
+    if extends_idx is not None:
+        del symbol_copy[extends_idx]
 
-    symbol_copy[1] = f"{lib_name}:{symbol_copy[1]}"
-    defs.append(symbol_copy)
-    seen.add(symbol_name)
-    return defs
+    if not parent_name:
+        return symbol_copy
+
+    parent_symbol = _resolve_symbol_with_extends(symbols, parent_name, seen)
+    if not parent_symbol:
+        return symbol_copy
+
+    return _merge_symbol_defs(parent_symbol, symbol_copy, parent_name, symbol_copy[1])
+
+
+def _merge_symbol_defs(parent_defn, child_defn, parent_name, child_name):
+    def _split_items(symbol_defn):
+        other = {}
+        other_order = []
+        props = {}
+        prop_order = []
+        symbols = {}
+        symbol_order = []
+        embedded_fonts = None
+
+        for item in symbol_defn[2:]:
+            if not (isinstance(item, list) and item):
+                continue
+            tag = str(item[0]).lower()
+            if tag == "extends":
+                continue
+            if tag == "embedded_fonts":
+                embedded_fonts = copy.deepcopy(item)
+                continue
+            if tag == "property":
+                prop_key = str(item[1]).lower() if len(item) > 1 else ""
+                if prop_key not in props:
+                    prop_order.append(prop_key)
+                props[prop_key] = copy.deepcopy(item)
+                continue
+            if tag == "symbol":
+                new_item = copy.deepcopy(item)
+                if len(new_item) > 1:
+                    new_item[1] = _rename_unit_symbol_name(
+                        new_item[1], parent_name, child_name
+                    )
+                symbol_key = new_item[1] if len(new_item) > 1 else ""
+                if symbol_key not in symbols:
+                    symbol_order.append(symbol_key)
+                symbols[symbol_key] = new_item
+                continue
+            if tag not in other:
+                other_order.append(tag)
+            other[tag] = copy.deepcopy(item)
+
+        return other, other_order, props, prop_order, symbols, symbol_order, embedded_fonts
+
+    (
+        parent_other,
+        parent_other_order,
+        parent_props,
+        parent_prop_order,
+        parent_symbols,
+        parent_symbol_order,
+        parent_embedded_fonts,
+    ) = _split_items(parent_defn)
+    (
+        child_other,
+        child_other_order,
+        child_props,
+        child_prop_order,
+        child_symbols,
+        child_symbol_order,
+        child_embedded_fonts,
+    ) = _split_items(child_defn)
+
+    merged = ["symbol", child_name]
+
+    merged_other = []
+    for tag in parent_other_order:
+        if tag in child_other:
+            merged_other.append(child_other.pop(tag))
+        else:
+            merged_other.append(parent_other[tag])
+    for tag in child_other_order:
+        if tag in child_other:
+            merged_other.append(child_other[tag])
+
+    merged_props = []
+    for prop_key in parent_prop_order:
+        if prop_key in child_props:
+            merged_props.append(child_props.pop(prop_key))
+        else:
+            merged_props.append(parent_props[prop_key])
+    for prop_key in child_prop_order:
+        if prop_key in child_props:
+            merged_props.append(child_props[prop_key])
+
+    merged_symbols = []
+    for symbol_key in parent_symbol_order:
+        if symbol_key in child_symbols:
+            merged_symbols.append(child_symbols.pop(symbol_key))
+        else:
+            merged_symbols.append(parent_symbols[symbol_key])
+    for symbol_key in child_symbol_order:
+        if symbol_key in child_symbols:
+            merged_symbols.append(child_symbols[symbol_key])
+
+    merged.extend(merged_other)
+    merged.extend(merged_props)
+    merged.extend(merged_symbols)
+
+    embedded_fonts = child_embedded_fonts or parent_embedded_fonts
+    if embedded_fonts is not None:
+        merged.append(embedded_fonts)
+
+    return merged
+
+
+def _collect_symbol_defs_with_extends(symbols, symbol_name, lib_name, seen=None):
+    symbol_defn = _resolve_symbol_with_extends(symbols, symbol_name, seen)
+    if not symbol_defn:
+        return []
+
+    symbol_defn[1] = f"{lib_name}:{symbol_defn[1]}"
+    return [symbol_defn]
 
 
 def _round_mm(value, digits=4):

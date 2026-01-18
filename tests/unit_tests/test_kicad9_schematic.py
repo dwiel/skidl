@@ -276,6 +276,77 @@ def test_kicad9_schematic_file_path(tmp_path):
         skidl.config.pickle_dir = orig_pickle_dir
 
 
+def test_kicad9_embedded_symbol_extends_resolved(tmp_path):
+    orig_pickle_dir = _setup_kicad9_libs(tmp_path)
+    try:
+        default_circuit.reset()
+
+        q1 = Part(
+            "Transistor_BJT",
+            "MMBT3904",
+            ref="Q1",
+            footprint="Package_TO_SOT_SMD:SOT-23",
+        )
+        q1["B"] += Net("BASE")
+        q1["C"] += Net("COLL")
+        q1["E"] += Net("GND")
+
+        sch_path = tmp_path / "extends_test.kicad_sch"
+        generate_schematic(
+            file_=str(sch_path),
+            flatness=1.0,
+            retries=1,
+            seed=1,
+        )
+
+        text = sch_path.read_text()
+        sexp = Sexp(text)
+        lib_symbols = sexp.search("kicad_sch/lib_symbols", ignore_case=True)
+        assert lib_symbols
+
+        lib_root = lib_symbols[0]
+        target = None
+        for item in lib_root[1:]:
+            if isinstance(item, list) and item and item[0] == "symbol":
+                if str(item[1]).endswith(":MMBT3904"):
+                    target = item
+                    break
+        assert target
+        assert not any(
+            isinstance(item, list) and item and item[0] == "extends" for item in target
+        )
+
+        unit_names = [
+            item[1]
+            for item in target
+            if isinstance(item, list) and item and item[0] == "symbol"
+        ]
+        assert "MMBT3904_0_1" in unit_names
+        assert "MMBT3904_1_1" in unit_names
+
+        unit = next(
+            item
+            for item in target
+            if isinstance(item, list)
+            and item
+            and item[0] == "symbol"
+            and item[1] == "MMBT3904_1_1"
+        )
+        pins = _pins_from_symbol(unit)
+        pin_nums = {pin["num"] for pin in pins}
+        assert {"1", "2", "3"}.issubset(pin_nums)
+
+        assert not any(
+            isinstance(item, list)
+            and item
+            and item[0] == "symbol"
+            and item[1] == "Transistor_BJT:Q_NPN_BEC"
+            for item in lib_root[1:]
+        )
+    finally:
+        skidl.config.pickle_dir = orig_pickle_dir
+
+
 def test_kicad9_pin_orientation_mapping(tmp_path):
     orig_pickle_dir = _setup_kicad9_libs(tmp_path)
     kicad9_gen = None

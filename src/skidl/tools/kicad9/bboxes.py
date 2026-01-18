@@ -23,6 +23,7 @@ from skidl.geometry import (
 )
 from skidl.utilities import export_to_all
 from .constants import HIER_TERM_SIZE, PIN_LABEL_FONT_SIZE
+from .gen_svg import draw_cmd_to_svg
 from skidl.geometry import BBox, Point, Tx, Vector
 
 
@@ -39,178 +40,22 @@ def calc_symbol_bbox(part, **options):
     Returns: List of BBoxes for all units in the part symbol.
     """
 
-    def find(lst, key):
-        """Find an sexpr clause with the given keyword."""
-        for item in lst:
-            if isinstance(item, (list, tuple)):
-                if item[0].lower() == key:
-                    return item
-        return None
+    unit_nums = [getattr(unit, "num", 1) for unit in part.unit.values()] or [1]
+    max_unit = max(unit_nums)
+    unit_bboxes = [BBox() for _ in range(max_unit + 1)]
 
-    default_pin_name_offset = 20
+    for unit in part.unit.values():
+        unit_num = getattr(unit, "num", 1)
+        unit_bbox = BBox()
+        for cmd in part.draw_cmds.get(unit_num, []):
+            _, cmd_bbox = draw_cmd_to_svg(cmd, Tx(), part, [], 0)
+            unit_bbox.add(cmd_bbox)
+        unit_bbox *= mils_per_mm
+        unit_bbox = unit_bbox.round()
+        unit.bbox = unit_bbox
+        unit_bboxes[unit_num] = unit_bbox
 
-    # Go through each graphic object that makes up the component symbol.
-    for unit_num, unit in part.unit.items():
-
-        # Bounding box for this part unit.
-        unit.bbox = BBox()
-
-        # Process the drawing objects for each unit which are stored in a dict in the part.
-        for obj in part.draw[unit_num]:
-
-            # First item is the object type, and the remainder are object parameters.
-            obj_type = obj[0].lower()
-            obj_params = obj[1:]
-
-            if obj_type == "reference" and not options.get("graphics_only", False):
-                raise NotImplementedError
-
-                # obj attributes: x y size orientation visibility halign valign
-                # Skip if the object is invisible.
-                if obj.visibility.upper() == "I":
-                    continue
-
-                # Calculate length and height of part reference.
-                # Use ref from the SKiDL part since the ref in the KiCAD part
-                # hasn't been updated from its generic value.
-                length = len(part.ref) * obj.size
-                height = obj.size
-
-                # Create bbox with lower-left point at (0, 0).
-                bbox = BBox(Point(0, 0), Point(length, height))
-
-                # Rotate bbox around origin.
-                rot_tx = {"H": Tx(), "V": tx_rot_90}[obj.orientation.upper()]
-                bbox *= rot_tx
-
-                # Horizontally align bbox.
-                halign = obj.halign.upper()
-                if halign == "L":
-                    pass
-                elif halign == "R":
-                    bbox *= Tx().move(Point(-bbox.w, 0))
-                elif halign == "C":
-                    bbox *= Tx().move(Point(-bbox.w / 2, 0))
-                else:
-                    raise Exception(
-                        f"Inconsistent horizontal alignment: {halign}"
-                    )
-
-                # Vertically align bbox.
-                valign = obj.valign[:1].upper()  # valign is first letter.
-                if valign == "B":
-                    pass
-                elif valign == "T":
-                    bbox *= Tx().move(Point(0, -bbox.h))
-                elif valign == "C":
-                    bbox *= Tx().move(Point(0, -bbox.h / 2))
-                else:
-                    raise Exception(
-                        f"Inconsistent vertical alignment: {valign}"
-                    )
-
-                bbox *= Tx().move(Point(obj.x, obj.y))
-                obj_bbox.add(bbox)
-
-            elif obj_type == "value" and not options.get("graphics_only", False):
-                raise NotImplementedError
-
-                # Skip if the object is invisible.
-                if obj.visibility.upper() == "I":
-                    continue
-
-                # Calculate length and height of part value.
-                # Use value from the SKiDL part since the value in the KiCAD part
-                # hasn't been updated from its generic value.
-                length = len(str(part.value)) * obj.size
-                height = obj.size
-
-                # Create bbox with lower-left point at (0, 0).
-                bbox = BBox(Point(0, 0), Point(length, height))
-
-                # Rotate bbox around origin.
-                rot_tx = {"H": Tx(), "V": tx_rot_90}[obj.orientation.upper()]
-                bbox *= rot_tx
-
-                # Horizontally align bbox.
-                halign = obj.halign.upper()
-                if halign == "L":
-                    pass
-                elif halign == "R":
-                    bbox *= Tx().move(Point(-bbox.w, 0))
-                elif halign == "C":
-                    bbox *= Tx().move(Point(-bbox.w / 2, 0))
-                else:
-                    raise Exception(
-                        f"Inconsistent horizontal alignment: {halign}"
-                    )
-
-                # Vertically align bbox.
-                valign = obj.valign[:1].upper()  # valign is first letter.
-                if valign == "B":
-                    pass
-                elif valign == "T":
-                    bbox *= Tx().move(Point(0, -bbox.h))
-                elif valign == "C":
-                    bbox *= Tx().move(Point(0, -bbox.h / 2))
-                else:
-                    raise Exception(
-                        f"Inconsistent vertical alignment: {valign}"
-                    )
-
-                bbox *= Tx().move(Point(obj.x, obj.y))
-                obj_bbox.add(bbox)
-
-            elif obj_type == "arc":
-                start = find(obj_params, "start")
-                start_pt = Point(start[1], start[2])
-                mid = find(obj_params, "mid")
-                mid_pt = Point(mid[1], mid[2])
-                end = find(obj_params, "end")
-                end_pt = Point(end[end[1], end[2]])
-                unit_bbox.add(start_pt, mid_pt, end_pt)
-
-            elif obj_type == "circle":
-                center = find(obj_params, "center")
-                center_pt = Point(center[1], center[2])
-                radius = find(obj_params, "radius")
-                radius = radius[1]
-                radius_pt = Point(radius, radius)
-                unit.bbox.add(center_pt + radius_pt, center_pt - radius_pt)
-
-            elif obj_type == "polyline":
-                pts = find(obj_params, "pts")
-                obj_bbox = BBox()
-                for pt in pts[1:]:
-                    unit.bbox.add(Point(pt[1], pt[2]))
-
-            elif obj_type == "rectangle":
-                start = find(obj_params, "start")
-                start_pt = Point(start[1], start[2])
-                end = find(obj_params, "end")
-                end_pt = Point(end[1], end[2])
-                unit.bbox.add(start_pt, end_pt)
-
-            elif obj_type == "text" and not options.get("graphics_only", False):
-                pass
-
-            elif obj_type == "pin":
-                if "hide" not in obj_params:
-                    x, y, angle = find(obj_params, "at")[1:4]
-                    length = find(obj_params, "length")[1]
-                    pt1 = Point(x, y)
-                    pt2 = pt1 + Point(length, 0) * Tx().rot(angle)
-                    unit.bbox.add(pt1, pt2)
-                    # TODO: Add pin number and name to bbox.
-
-            else:
-                active_logger.error(
-                    f"Unknown graphical object {obj_type} in part symbol {part.name}."
-                )
-
-        # After the unit bounding box is calculated, change it from mm to mils.
-        unit.bbox *= mils_per_mm
-        unit.bbox = unit.bbox.round()
+    return unit_bboxes
 
 
 @export_to_all
@@ -224,8 +69,6 @@ def calc_hier_label_bbox(label, dir):
     Returns:
         BBox: Bounding box for the label and hierarchical terminal.
     """
-
-    raise NotImplementedError
 
     # Rotation matrices for each direction.
     lbl_tx = {

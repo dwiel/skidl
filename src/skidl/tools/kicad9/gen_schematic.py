@@ -9,11 +9,11 @@ import os
 import os.path
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 
 from simp_sexp import Sexp
 from skidl.scriptinfo import get_script_name
-from skidl.geometry import BBox, Point, Tx, Vector
+from skidl.geometry import BBox, Point, Tx, Vector, mils_per_mm, mms_per_mil
 from skidl.schematics.net_terminal import NetTerminal
 from skidl.utilities import export_to_all, rmv_attr
 from .constants import BLK_INT_PAD, BOX_LABEL_FONT_SIZE, GRID, PIN_LABEL_FONT_SIZE
@@ -26,6 +26,9 @@ __all__ = []
 """
 Functions for generating a KiCad 9 schematic using s-expressions.
 """
+
+# Cached symbol definitions per library file.
+_LIB_SYMBOL_CACHE = {}
 
 # KiCad 9 schematic page sizes in mm
 A_SIZES_MM = OrderedDict([
@@ -157,9 +160,223 @@ def get_lib_symbol_definition_from_part(part):
         part: SKiDL Part object
 
     Returns:
-        list: Nested list representing the library symbol definition
+        list: List of nested lists representing library symbol definitions
     """
-    return part_to_lib_symbol_definition(part)
+    symbol_defs = _get_lib_symbol_definitions_from_library(part)
+    if symbol_defs:
+        return symbol_defs
+    return [part_to_lib_symbol_definition(part)]
+
+
+def _get_lib_symbol_definitions_from_library(part):
+    lib = getattr(part, "lib", None)
+    lib_path = getattr(lib, "filepath", None)
+    if not lib_path or not os.path.isfile(lib_path):
+        return None
+
+    symbols = _load_library_symbols(lib_path)
+    if not symbols:
+        return None
+
+    symbol_name = part.name
+    if symbol_name not in symbols and getattr(part, "aliases", None):
+        for alias in part.aliases:
+            if alias in symbols:
+                symbol_name = alias
+                break
+
+    if symbol_name not in symbols:
+        return None
+
+    lib_name = os.path.splitext(getattr(lib, "filename", "") or os.path.basename(lib_path))[0]
+    return _collect_symbol_defs_with_extends(symbols, symbol_name, lib_name)
+
+
+def _load_library_symbols(lib_path):
+    cached = _LIB_SYMBOL_CACHE.get(lib_path)
+    if cached is not None:
+        return cached
+
+    try:
+        with open(lib_path, "rb") as f:
+            lib_txt = f.read()
+    except OSError:
+        _LIB_SYMBOL_CACHE[lib_path] = None
+        return None
+
+    try:
+        lib_txt = lib_txt.decode("latin_1")
+    except AttributeError:
+        pass
+
+    try:
+        lib_sexp = Sexp(lib_txt)
+    except Exception:
+        _LIB_SYMBOL_CACHE[lib_path] = None
+        return None
+
+    symbols = OrderedDict(
+        (symbol[1], symbol)
+        for symbol in lib_sexp.search("/kicad_symbol_lib/symbol", ignore_case=True)
+    )
+    _LIB_SYMBOL_CACHE[lib_path] = symbols
+    return symbols
+
+
+def _collect_symbol_defs_with_extends(symbols, symbol_name, lib_name, seen=None):
+    if seen is None:
+        seen = set()
+    if symbol_name in seen:
+        return []
+
+    symbol = symbols.get(symbol_name)
+    if not symbol:
+        return []
+
+    symbol_copy = copy.deepcopy(symbol)
+    parent_name = None
+    for item in symbol_copy:
+        if isinstance(item, list) and item and item[0].lower() == "extends":
+            parent_name = item[1]
+            item[1] = f"{lib_name}:{item[1]}"
+            break
+
+    defs = []
+    if parent_name:
+        defs.extend(_collect_symbol_defs_with_extends(symbols, parent_name, lib_name, seen))
+
+    symbol_copy[1] = f"{lib_name}:{symbol_copy[1]}"
+    defs.append(symbol_copy)
+    seen.add(symbol_name)
+    return defs
+
+
+def _round_mm(value, digits=4):
+    return round(float(value), digits)
+
+
+def _tx_to_kicad_orientation(tx):
+    tx = tx.no_translate()
+    key = (
+        int(round(tx.a)),
+        int(round(tx.b)),
+        int(round(tx.c)),
+        int(round(tx.d)),
+    )
+
+    rotation_map = {
+        (1, 0, 0, 1): 0,
+        (0, 1, -1, 0): 90,
+        (-1, 0, 0, -1): 180,
+        (0, -1, 1, 0): 270,
+    }
+    mirror_y_map = {
+        (-1, 0, 0, 1): 0,
+        (0, 1, 1, 0): 90,
+        (1, 0, 0, -1): 180,
+        (0, -1, -1, 0): 270,
+    }
+    mirror_x_map = {
+        (1, 0, 0, -1): 0,
+        (0, -1, -1, 0): 90,
+        (-1, 0, 0, 1): 180,
+        (0, 1, 1, 0): 270,
+    }
+
+    if key in rotation_map:
+        return rotation_map[key], None
+    if key in mirror_y_map:
+        return mirror_y_map[key], "y"
+    if key in mirror_x_map:
+        return mirror_x_map[key], "x"
+
+    return 0, None
+
+
+def _calc_pin_dir(pin):
+    tx = pin.part.tx.no_translate()
+    pin_vector = {
+        "U": Point(0, 1),
+        "D": Point(0, -1),
+        "L": Point(-1, 0),
+        "R": Point(1, 0),
+    }[pin.orientation]
+    pin_vector = pin_vector * tx
+    pin_vector = (int(round(pin_vector.x)), int(round(pin_vector.y)))
+    return {
+        (0, 1): "U",
+        (0, -1): "D",
+        (-1, 0): "L",
+        (1, 0): "R",
+    }[pin_vector]
+
+
+def _net_label_kind(pin):
+    net = pin.net
+    pin_hiertuple = pin.part.hiertuple
+    label_kind = "hierarchical_label"
+    for pn in net.pins:
+        pn_hiertuple = pn.part.hiertuple
+        if pin_hiertuple[: len(pn_hiertuple)] == pn_hiertuple:
+            continue
+        if pn_hiertuple[: len(pin_hiertuple)] == pin_hiertuple:
+            continue
+        label_kind = "global_label"
+        break
+
+    if label_kind != "global_label":
+        hiertuples = {p.part.hiertuple for p in net.pins}
+        if len(hiertuples) <= 1:
+            label_kind = "label"
+
+    if label_kind == "label" and (pin.stub or isinstance(pin.part, NetTerminal)):
+        label_kind = "global_label"
+
+    return label_kind
+
+
+def _net_label_shape(net):
+    netio = getattr(net, "netio", "").lower()
+    return {
+        "i": "input",
+        "o": "output",
+        "b": "bidirectional",
+        "t": "tri_state",
+        "p": "passive",
+    }.get(netio[:1], "input")
+
+
+def pin_label_to_sexp(pin, tx):
+    if not pin.is_connected():
+        return None
+
+    is_net_terminal = isinstance(pin.part, NetTerminal)
+    if not (is_net_terminal or pin.stub):
+        return None
+
+    label_kind = _net_label_kind(pin)
+    part_tx = pin.part.tx * tx
+    pt = pin.pt * part_tx
+    pin_dir = _calc_pin_dir(pin)
+    angle = {"R": 0, "D": 90, "L": 180, "U": 270}[pin_dir]
+    justify = "left" if angle in (0, 90) else "right"
+    font_size = _round_mm(PIN_LABEL_FONT_SIZE * mms_per_mil)
+
+    label_list = [label_kind, pin.net.name]
+    if label_kind != "label":
+        label_list.append(["shape", _net_label_shape(pin.net)])
+    label_list.extend(
+        [
+            ["at", _round_mm(pt.x), _round_mm(pt.y), angle],
+            [
+                "effects",
+                ["font", ["size", font_size, font_size]],
+                ["justify", justify] + ([] if label_kind != "label" else ["bottom"]),
+            ],
+            ["uuid", str(uuid.uuid4())],
+        ]
+    )
+    return label_list
 
 
 def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
@@ -177,9 +394,13 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
     if not part.ref:
         return None
 
+    tx = tx or Tx()
+
     # Transform part position
     origin = (part.tx * tx).origin
-    pos_x, pos_y = float(origin.x), float(origin.y)
+    pos_x = _round_mm(origin.x)
+    pos_y = _round_mm(origin.y)
+    angle, mirror = _tx_to_kicad_orientation(part.tx)
 
     # Generate UUID using same scheme as netlist generator
     symbol_uuid = gen_part_tstamp(part)
@@ -222,7 +443,7 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
     symbol_list = [
         "symbol",
         ["lib_id", f"{lib_name}:{part_name}"],
-        ["at", pos_x, pos_y, 0],
+        ["at", pos_x, pos_y, angle],
         ["unit", unit_num],
         ["exclude_from_sim", "no"],
         ["in_bom", "yes"],
@@ -231,12 +452,12 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
         ["uuid", symbol_uuid],
         # Reference property
         ["property", "Reference", part.ref,
-            ["at", pos_x, pos_y - 2.54, 0],
+            ["at", pos_x, _round_mm(pos_y - 2.54), 0],
             ["effects", ["font", ["size", 1.27, 1.27]]]
         ],
         # Value property
         ["property", "Value", str(part.value) if part.value else part.name,
-            ["at", pos_x, pos_y + 2.54, 0],
+            ["at", pos_x, _round_mm(pos_y + 2.54), 0],
             ["effects", ["font", ["size", 1.27, 1.27]]]
         ],
         # Footprint property (hidden)
@@ -256,6 +477,9 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
         ]
     ]
 
+    if mirror:
+        symbol_list.append(["mirror", mirror])
+
     # Add all fields from part.fields dictionary (auto-export custom properties)
     y_offset = 5.08  # Start with 0.2 inch offset below the part
     if hasattr(part, 'fields') and part.fields:
@@ -268,7 +492,7 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
             if field_value and str(field_value).strip():
                 field_property = [
                     "property", field_name, str(field_value),
-                    ["at", pos_x, pos_y + y_offset, 0],
+                    ["at", pos_x, _round_mm(pos_y + y_offset), 0],
                     ["effects", ["font", ["size", 1.27, 1.27]], ["hide"]]
                 ]
                 symbol_list.append(field_property)
@@ -295,7 +519,7 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
             if not (hasattr(part, 'fields') and prop_name in part.fields):
                 additional_property = [
                     "property", prop_name, str(attr_value),
-                    ["at", pos_x, pos_y + y_offset, 0],
+                    ["at", pos_x, _round_mm(pos_y + y_offset), 0],
                     ["effects", ["font", ["size", 1.27, 1.27]], ["hide"]]
                 ]
                 symbol_list.append(additional_property)
@@ -328,6 +552,7 @@ def net_to_wire_sexp(net, wire_segments, tx):
     Returns:
         list: List of nested lists representing wire s-expressions
     """
+    tx = tx or Tx()
     wires = []
 
     for segment in wire_segments:
@@ -341,8 +566,8 @@ def net_to_wire_sexp(net, wire_segments, tx):
         wire_list = [
             "wire",
             ["pts",
-                ["xy", float(start.x), float(start.y)],
-                ["xy", float(end.x), float(end.y)]
+                ["xy", _round_mm(start.x), _round_mm(start.y)],
+                ["xy", _round_mm(end.x), _round_mm(end.y)]
             ],
             ["stroke", ["width", 0], ["type", "default"]],
             ["uuid", wire_uuid]
@@ -414,6 +639,129 @@ def create_hierarchical_sheet_sexp(node_name, sheet_filename, position, size, sh
     return sheet_sexp
 
 
+def preprocess_circuit(circuit, **options):
+    """Add stuff to parts & nets for doing placement and routing of schematics."""
+
+    def units(part):
+        if len(part.unit) == 0:
+            return [part]
+        return part.unit.values()
+
+    def initialize(part):
+        """Initialize part or its part units."""
+
+        pin_limit = options.get("orientation_pin_limit", 44)
+        for part_unit in units(part):
+            part_unit.tx = Tx.from_symtx(getattr(part_unit, "symtx", ""))
+
+            num_pins = len(part_unit.pins)
+            part_unit.orientation_locked = getattr(part_unit, "symtx", False) or not (
+                1 < num_pins <= pin_limit
+            )
+
+            part_unit.grab_pins()
+
+            for pin in part_unit:
+                pin.pt = Point(pin.x * mils_per_mm, pin.y * mils_per_mm)
+                if isinstance(pin.orientation, (int, float)):
+                    pin.orientation = {
+                        0: "R",
+                        90: "D",
+                        180: "L",
+                        270: "U",
+                    }.get(pin.orientation, pin.orientation)
+                pin.routed = False
+
+    def rotate_power_pins(part):
+        """Rotate a part based on the direction of its power pins."""
+
+        if not getattr(part, "symtx", ""):
+            return
+
+        def is_pwr(net):
+            return net_name.startswith("+")
+
+        def is_gnd(net):
+            return "gnd" in net_name.lower()
+
+        dont_rotate_pin_cnt = options.get("dont_rotate_pin_count", 10000)
+
+        for part_unit in units(part):
+            if len(part_unit) > dont_rotate_pin_cnt:
+                return
+
+            rotation_tally = Counter()
+            for pin in part_unit:
+                net_name = getattr(pin.net, "name", "").lower()
+                if is_gnd(net_name):
+                    if pin.orientation == "U":
+                        rotation_tally[0] += 1
+                    if pin.orientation == "D":
+                        rotation_tally[180] += 1
+                    if pin.orientation == "L":
+                        rotation_tally[90] += 1
+                    if pin.orientation == "R":
+                        rotation_tally[270] += 1
+                elif is_pwr(net_name):
+                    if pin.orientation == "D":
+                        rotation_tally[0] += 1
+                    if pin.orientation == "U":
+                        rotation_tally[180] += 1
+                    if pin.orientation == "L":
+                        rotation_tally[270] += 1
+                    if pin.orientation == "R":
+                        rotation_tally[90] += 1
+
+            try:
+                rotation = rotation_tally.most_common()[0][0]
+            except IndexError:
+                pass
+            else:
+                tx_cw_90 = Tx(a=0, b=-1, c=1, d=0)
+                for _ in range(int(round(rotation / 90))):
+                    part_unit.tx = part_unit.tx * tx_cw_90
+
+    def calc_part_bbox(part):
+        """Calculate the labeled bounding boxes and store it in the part."""
+
+        bare_bboxes = calc_symbol_bbox(part)[1:]
+
+        for part_unit, bare_bbox in zip(units(part), bare_bboxes):
+            resize_wh = Vector(0, 0)
+            if bare_bbox.w < 100:
+                resize_wh.x = (100 - bare_bbox.w) / 2
+            if bare_bbox.h < 100:
+                resize_wh.y = (100 - bare_bbox.h) / 2
+            bare_bbox = bare_bbox.resize(resize_wh)
+
+            part_unit.lbl_bbox = BBox()
+            part_unit.lbl_bbox.add(bare_bbox)
+            for pin in part_unit:
+                if pin.stub:
+                    hlbl_bbox = calc_hier_label_bbox(pin.net.name, pin.orientation)
+                    hlbl_bbox *= Tx().move(pin.pt)
+                    part_unit.lbl_bbox.add(hlbl_bbox)
+
+            part_unit.bbox = part_unit.lbl_bbox
+
+    for part in circuit.parts:
+        initialize(part)
+        rotate_power_pins(part)
+        calc_part_bbox(part)
+
+
+def finalize_parts_and_nets(circuit, **options):
+    """Restore parts and nets after place & route is done."""
+
+    net_terminals = (p for p in circuit.parts if isinstance(p, NetTerminal))
+    circuit.rmv_parts(*net_terminals)
+
+    for part in circuit.parts:
+        part.grab_pins()
+
+    rmv_attr(circuit.parts, ("force", "bbox", "lbl_bbox", "tx"))
+
+
 def group_parts_by_hierarchy(circuit):
     """Group circuit parts by their complete hierarchical paths.
 
@@ -450,6 +798,20 @@ def group_parts_by_hierarchy(circuit):
     return hierarchy_groups
 
 
+def build_node_map(node, path="", node_map=None):
+    """Build a lookup of hierarchy paths to SchNode instances."""
+
+    if node_map is None:
+        node_map = {}
+
+    node_map[path] = node
+    for name, child in node.children.items():
+        child_path = f"{path}/{name}" if path else name
+        build_node_map(child, child_path, node_map)
+
+    return node_map
+
+
 def get_all_hierarchy_levels(hierarchy_groups):
     """Extract all unique hierarchy levels from the grouped parts.
 
@@ -472,7 +834,7 @@ def get_all_hierarchy_levels(hierarchy_groups):
     return all_levels
 
 
-def create_schematic_sexp_for_hierarchy_group(parts_group, title="SKiDL-Generated Schematic", main_sheet_uuid=None, sheet_uuids=None, **options):
+def create_schematic_sexp_for_hierarchy_group(parts_group, title="SKiDL-Generated Schematic", main_sheet_uuid=None, sheet_uuids=None, sheet_tx=None, **options):
     """Create schematic s-expression for a specific hierarchy group.
 
     Args:
@@ -495,12 +857,12 @@ def create_schematic_sexp_for_hierarchy_group(parts_group, title="SKiDL-Generate
     unique_lib_parts = {}  # Map lib_id -> part (to avoid duplicates)
     symbol_parts = []  # Store parts and their data for later processing
 
-    base_tx = Tx()
+    sheet_tx = sheet_tx or Tx()
     for i, part in enumerate(parts_group):
-        # Simple positioning - arrange parts in a grid
-        grid_x = (i % 5) * 25.4  # 5 parts per row, 1 inch spacing
-        grid_y = (i // 5) * 12.7  # 0.5 inch row spacing
-        part.tx = Tx().move(Point(grid_x, grid_y))
+        if not hasattr(part, "tx"):
+            grid_x = (i % 5) * 25.4 * mils_per_mm  # 5 parts per row, 1 inch spacing
+            grid_y = (i // 5) * 12.7 * mils_per_mm  # 0.5 inch row spacing
+            part.tx = Tx().move(Point(grid_x, grid_y))
 
         # Get library and part name
         lib_name = os.path.splitext(part.lib.filename)[0] if hasattr(part.lib, 'filename') and part.lib.filename else "Device"
@@ -511,13 +873,18 @@ def create_schematic_sexp_for_hierarchy_group(parts_group, title="SKiDL-Generate
         if lib_id not in unique_lib_parts:
             unique_lib_parts[lib_id] = part
 
-        symbol_parts.append((part, base_tx))
+        symbol_parts.append((part, sheet_tx))
 
     # Create lib_symbols section using actual SKiDL part data
     lib_symbols_list = ["lib_symbols"]
+    seen_symbols = set()
     for lib_id, part in unique_lib_parts.items():
-        symbol_def = get_lib_symbol_definition_from_part(part)
-        lib_symbols_list.append(symbol_def)
+        for symbol_def in get_lib_symbol_definition_from_part(part):
+            symbol_name = symbol_def[1]
+            if symbol_name in seen_symbols:
+                continue
+            lib_symbols_list.append(symbol_def)
+            seen_symbols.add(symbol_name)
 
     # Create basic schematic structure
     schematic_list = [
@@ -559,7 +926,7 @@ def create_schematic_sexp_for_hierarchy_group(parts_group, title="SKiDL-Generate
     return Sexp(schematic_list)
 
 
-def create_subcircuit_schematic_with_child_sheets(parts_group, current_path, title, main_sheet_uuid, sheet_uuids, hierarchy_groups, top_name, **options):
+def create_subcircuit_schematic_with_child_sheets(parts_group, current_path, title, main_sheet_uuid, sheet_uuids, hierarchy_groups, top_name, node_map=None, sheet_tx=None, **options):
     """Create schematic s-expression for a hierarchy level with child sheet references.
 
     Args:
@@ -581,16 +948,17 @@ def create_subcircuit_schematic_with_child_sheets(parts_group, current_path, tit
     if sheet_uuids is None:
         sheet_uuids = {}
 
+    sheet_tx = sheet_tx or Tx()
+
     # Collect unique library symbols used in this group
     unique_lib_parts = {}  # Map lib_id -> part (to avoid duplicates)
     symbol_parts = []  # Store parts and their data for later processing
 
-    base_tx = Tx()
     for i, part in enumerate(parts_group):
-        # Simple positioning - arrange parts in a grid
-        grid_x = (i % 5) * 25.4  # 5 parts per row, 1 inch spacing
-        grid_y = (i // 5) * 12.7  # 0.5 inch row spacing
-        part.tx = Tx().move(Point(grid_x, grid_y))
+        if not hasattr(part, "tx"):
+            grid_x = (i % 5) * 25.4 * mils_per_mm  # 5 parts per row, 1 inch spacing
+            grid_y = (i // 5) * 12.7 * mils_per_mm  # 0.5 inch row spacing
+            part.tx = Tx().move(Point(grid_x, grid_y))
 
         # Get library and part name
         lib_name = os.path.splitext(part.lib.filename)[0] if hasattr(part.lib, 'filename') and part.lib.filename else "Device"
@@ -601,13 +969,18 @@ def create_subcircuit_schematic_with_child_sheets(parts_group, current_path, tit
         if lib_id not in unique_lib_parts:
             unique_lib_parts[lib_id] = part
 
-        symbol_parts.append((part, base_tx))
+        symbol_parts.append((part, sheet_tx))
 
     # Create lib_symbols section using actual SKiDL part data
     lib_symbols_list = ["lib_symbols"]
+    seen_symbols = set()
     for lib_id, part in unique_lib_parts.items():
-        symbol_def = get_lib_symbol_definition_from_part(part)
-        lib_symbols_list.append(symbol_def)
+        for symbol_def in get_lib_symbol_definition_from_part(part):
+            symbol_name = symbol_def[1]
+            if symbol_name in seen_symbols:
+                continue
+            lib_symbols_list.append(symbol_def)
+            seen_symbols.add(symbol_name)
 
     # Create basic schematic structure
     schematic_list = [
@@ -627,6 +1000,18 @@ def create_subcircuit_schematic_with_child_sheets(parts_group, current_path, tit
         symbol_sexp = part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids)
         if symbol_sexp:
             schematic_list.append(symbol_sexp)
+
+    if node_map:
+        node = node_map.get(current_path)
+        if node:
+            for net, segments in node.wires.items():
+                for wire in net_to_wire_sexp(net, segments, sheet_tx):
+                    schematic_list.append(wire)
+            for part in node.parts:
+                for pin in part:
+                    label = pin_label_to_sexp(pin, sheet_tx)
+                    if label:
+                        schematic_list.append(label)
 
     # Now add child sheet symbols for any deeper levels
     child_levels = []
@@ -663,7 +1048,7 @@ def create_subcircuit_schematic_with_child_sheets(parts_group, current_path, tit
     return Sexp(schematic_list)
 
 
-def create_main_schematic_sexp(circuit, title, hierarchy_groups, top_name, **options):
+def create_main_schematic_sexp(circuit, title, hierarchy_groups, top_name, node_map=None, sheet_tx=None, **options):
     """Create the main schematic s-expression, potentially with hierarchical sheets.
 
     Args:
@@ -676,6 +1061,8 @@ def create_main_schematic_sexp(circuit, title, hierarchy_groups, top_name, **opt
     Returns:
         tuple: (Sexp object for the main schematic, main sheet UUID, dict of sheet UUIDs)
     """
+    sheet_tx = sheet_tx or Tx()
+
     # Generate stable UUID for main schematic using same approach as netlist generation
     # For root level, netlist generation uses "/" path, so we generate UUID from that
     main_sheet_uuid = str(uuid.uuid5(namespace_uuid, "/"))
@@ -705,9 +1092,14 @@ def create_main_schematic_sexp(circuit, title, hierarchy_groups, top_name, **opt
 
     # Create lib_symbols section
     lib_symbols_list = ["lib_symbols"]
+    seen_symbols = set()
     for lib_id, part in unique_lib_parts.items():
-        symbol_def = get_lib_symbol_definition_from_part(part)
-        lib_symbols_list.append(symbol_def)
+        for symbol_def in get_lib_symbol_definition_from_part(part):
+            symbol_name = symbol_def[1]
+            if symbol_name in seen_symbols:
+                continue
+            lib_symbols_list.append(symbol_def)
+            seen_symbols.add(symbol_name)
 
     # Create main schematic structure
     schematic_list = [
@@ -725,14 +1117,26 @@ def create_main_schematic_sexp(circuit, title, hierarchy_groups, top_name, **opt
     if "" in hierarchy_groups:
         root_parts = hierarchy_groups[""]
         for i, part in enumerate(root_parts):
-            # Simple positioning for root parts
-            grid_x = (i % 5) * 25.4
-            grid_y = (i // 5) * 12.7
-            part.tx = Tx().move(Point(grid_x, grid_y))
+            if not hasattr(part, "tx"):
+                grid_x = (i % 5) * 25.4 * mils_per_mm
+                grid_y = (i // 5) * 12.7 * mils_per_mm
+                part.tx = Tx().move(Point(grid_x, grid_y))
 
-            symbol_sexp = part_to_symbol_sexp(part, Tx(), main_sheet_uuid, sheet_uuids)
+            symbol_sexp = part_to_symbol_sexp(part, sheet_tx, main_sheet_uuid, sheet_uuids)
             if symbol_sexp:
                 schematic_list.append(symbol_sexp)
+
+    if node_map:
+        node = node_map.get("")
+        if node:
+            for net, segments in node.wires.items():
+                for wire in net_to_wire_sexp(net, segments, sheet_tx):
+                    schematic_list.append(wire)
+            for part in node.parts:
+                for pin in part:
+                    label = pin_label_to_sexp(pin, sheet_tx)
+                    if label:
+                        schematic_list.append(label)
 
     # Add hierarchical sheet symbols for immediate child subcircuits only (top-level)
     sheet_y = 50.0  # Start position for sheets
@@ -782,10 +1186,30 @@ def gen_schematic(
     """
 
     from skidl.logger import active_logger
+    from skidl import KICAD9
+    from skidl.schematics.place import PlacementFailure
+    from skidl.schematics.route import RoutingFailure
+    from skidl.tools import tool_modules
+    from skidl.schematics.sch_node import SchNode
 
     def need_quote(x):
         key = x[0] if x else None
-        if key in ("title", "date", "company", "comment", "path", "project", "property", "name", "number", "lib_id", "reference"):
+        if key in (
+            "title",
+            "date",
+            "company",
+            "comment",
+            "path",
+            "project",
+            "property",
+            "name",
+            "number",
+            "lib_id",
+            "reference",
+            "label",
+            "hierarchical_label",
+            "global_label",
+        ):
             return True
         return False
 
@@ -796,7 +1220,6 @@ def gen_schematic(
         return False
 
     try:
-        # Create output filename
         main_schematic_filename = os.path.join(filepath, f"{top_name}.kicad_sch")
 
         if not circuit.parts:
@@ -806,61 +1229,115 @@ def gen_schematic(
         active_logger.info(f"Generating KiCad 9 schematic: {main_schematic_filename}")
         active_logger.info(f"Processing {len(circuit.parts)} parts and {len(circuit.nets)} nets")
 
-        # Group parts by hierarchy to determine if we need multiple files
         hierarchy_groups = group_parts_by_hierarchy(circuit)
         active_logger.info(f"Found {len(hierarchy_groups)} hierarchy levels: {list(hierarchy_groups.keys())}")
 
-        # Generate main schematic (may contain sheet symbols for subcircuits)
-        main_schematic_sexp, main_sheet_uuid, sheet_uuids = create_main_schematic_sexp(circuit, title, hierarchy_groups, top_name, **options)
-        # Add quotes but avoid double-quoting already quoted strings
-        main_schematic_sexp.add_quotes(need_quote)
-        main_schematic_sexp.add_quotes(need_quote_alternate, stop_idx=2)
+        options["use_push_pull"] = True
+        options["rotate_parts"] = True
+        options["pt_to_pt_mult"] = 5
+        options["pin_normalize"] = True
 
-        with open(main_schematic_filename, 'w') as f:
-            f.write(main_schematic_sexp.to_str())
+        expansion_factor = 1.0
+        failure_type = None
 
-        active_logger.info(f"Main schematic created: {main_schematic_filename}")
+        for _ in range(retries):
+            preprocess_circuit(circuit, **options)
+            node = SchNode(circuit, tool_modules[KICAD9], filepath, top_name, title, flatness)
 
-        # Generate separate schematic files for ALL hierarchy levels recursively
-        subcircuit_count = 0
-
-        def create_subcircuit_schematic(node_path, parts_list, depth=0):
-            nonlocal subcircuit_count
-
-            # Generate filename based on path (replace / with _) with top_name prefix
-            safe_name = node_path.replace("/", "_")
-            subcircuit_filename = os.path.join(filepath, f"{top_name}_{safe_name}.kicad_sch")
-            subcircuit_title = f"{title} - {node_path}"
-
-            active_logger.info(f"{'  ' * depth}Creating schematic for level: {node_path}")
-
-            # Create schematic for this level (includes its own parts)
-            subcircuit_sexp = create_subcircuit_schematic_with_child_sheets(
-                parts_list, node_path, subcircuit_title, main_sheet_uuid, sheet_uuids, hierarchy_groups, top_name, **options
-            )
-
-            # Add quotes but avoid double-quoting already quoted strings
-            subcircuit_sexp.add_quotes(need_quote)
-            subcircuit_sexp.add_quotes(need_quote_alternate, stop_idx=2)
-
-            with open(subcircuit_filename, 'w') as f:
-                f.write(subcircuit_sexp.to_str())
-
-            active_logger.info(f"{'  ' * depth}Subcircuit schematic created: {subcircuit_filename}")
-            return 1
-
-        # Process all hierarchy levels recursively
-        for node_path, parts in hierarchy_groups.items():
-            if node_path == "":  # Skip root level
+            try:
+                node.place(tool=KICAD9, expansion_factor=expansion_factor, **options)
+                node.route(tool=KICAD9, **options)
+            except PlacementFailure as e:
+                finalize_parts_and_nets(circuit, **options)
+                failure_type = e
+                continue
+            except RoutingFailure as e:
+                finalize_parts_and_nets(circuit, **options)
+                expansion_factor *= 1.5
+                failure_type = e
                 continue
 
-            count = create_subcircuit_schematic(node_path, parts)
-            subcircuit_count += count
+            node_map = build_node_map(node)
+            sheet_tx = Tx(a=mms_per_mil, d=mms_per_mil)
 
-        if subcircuit_count > 0:
-            active_logger.info(f"Generated {subcircuit_count} subcircuit schematic files")
-        else:
-            active_logger.info("No subcircuits found - generated single flat schematic")
+            main_schematic_sexp, main_sheet_uuid, sheet_uuids = create_main_schematic_sexp(
+                circuit,
+                title,
+                hierarchy_groups,
+                top_name,
+                node_map=node_map,
+                sheet_tx=sheet_tx,
+                **options,
+            )
+
+            main_schematic_sexp.add_quotes(need_quote)
+            main_schematic_sexp.add_quotes(need_quote_alternate, stop_idx=2)
+
+            with open(main_schematic_filename, "w") as f:
+                f.write(main_schematic_sexp.to_str())
+
+            active_logger.info(f"Main schematic created: {main_schematic_filename}")
+
+            subcircuit_count = 0
+
+            def create_subcircuit_schematic(node_path, parts_list, depth=0):
+                nonlocal subcircuit_count
+
+                safe_name = node_path.replace("/", "_")
+                subcircuit_filename = os.path.join(filepath, f"{top_name}_{safe_name}.kicad_sch")
+                subcircuit_title = f"{title} - {node_path}"
+
+                active_logger.info(f"{'  ' * depth}Creating schematic for level: {node_path}")
+
+                subcircuit_sexp = create_subcircuit_schematic_with_child_sheets(
+                    parts_list,
+                    node_path,
+                    subcircuit_title,
+                    main_sheet_uuid,
+                    sheet_uuids,
+                    hierarchy_groups,
+                    top_name,
+                    node_map=node_map,
+                    sheet_tx=sheet_tx,
+                    **options,
+                )
+
+                subcircuit_sexp.add_quotes(need_quote)
+                subcircuit_sexp.add_quotes(need_quote_alternate, stop_idx=2)
+
+                with open(subcircuit_filename, "w") as f:
+                    f.write(subcircuit_sexp.to_str())
+
+                active_logger.info(f"{'  ' * depth}Subcircuit schematic created: {subcircuit_filename}")
+                return 1
+
+            for node_path, parts in hierarchy_groups.items():
+                if node_path == "":
+                    continue
+
+                count = create_subcircuit_schematic(node_path, parts)
+                subcircuit_count += count
+
+            if subcircuit_count > 0:
+                active_logger.info(f"Generated {subcircuit_count} subcircuit schematic files")
+            else:
+                active_logger.info("No subcircuits found - generated single flat schematic")
+
+            if options.get("collect_stats"):
+                stats = node.collect_stats(**options)
+                with open(options["stats_file"], "a") as f:
+                    f.write(stats)
+
+            finalize_parts_and_nets(circuit, **options)
+            return
+
+        if options.get("collect_stats"):
+            stats = "-1\n"
+            with open(options["stats_file"], "a") as f:
+                f.write(stats)
+
+        finalize_parts_and_nets(circuit, **options)
+        raise failure_type
 
     except Exception as e:
         active_logger.error(f"Error generating KiCad 9 schematic: {str(e)}")

@@ -347,6 +347,119 @@ def test_kicad9_embedded_symbol_extends_resolved(tmp_path):
         skidl.config.pickle_dir = orig_pickle_dir
 
 
+def test_kicad9_multiunit_symbol_units_present(tmp_path):
+    orig_pickle_dir = _setup_kicad9_libs(tmp_path)
+    try:
+        default_circuit.reset()
+
+        vcc = Net("VCC")
+        gnd = Net("GND")
+        vout = Net("VOUT")
+
+        u1 = Part(
+            "Amplifier_Operational",
+            "LM358",
+            ref="U1",
+            value="LM358",
+            footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+        )
+
+        u1[3] += vcc
+        u1[2] += gnd
+        u1[1] += vout
+        u1[4] += gnd
+        u1[8] += vcc
+
+        sch_path = tmp_path / "multiunit.kicad_sch"
+        generate_schematic(
+            file_=str(sch_path),
+            flatness=1.0,
+            retries=1,
+            seed=1,
+        )
+
+        sexp = Sexp(sch_path.read_text())
+        instances = _symbol_instances(sexp)
+        lm358_units = {
+            inst["unit"]
+            for inst in instances
+            if inst["lib_id"].endswith(":LM358")
+        }
+        assert 1 in lm358_units
+        assert 3 in lm358_units
+    finally:
+        skidl.config.pickle_dir = orig_pickle_dir
+
+
+def test_kicad9_multiunit_symbol_not_at_origin(tmp_path):
+    orig_pickle_dir = _setup_kicad9_libs(tmp_path)
+    try:
+        default_circuit.reset()
+
+        vcc = Net("VCC")
+        gnd = Net("GND")
+        vin = Net("VIN")
+        vout = Net("VOUT")
+        inv_input = Net("INV_INPUT")
+
+        r_in = Part(
+            "Device",
+            "R",
+            ref="R1",
+            value="10k",
+            footprint="Resistor_SMD:R_0402_1005Metric",
+        )
+        r_fb = Part(
+            "Device",
+            "R",
+            ref="R2",
+            value="100k",
+            footprint="Resistor_SMD:R_0402_1005Metric",
+        )
+        u1 = Part(
+            "Amplifier_Operational",
+            "LM358",
+            ref="U1",
+            value="LM358",
+            footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+        )
+
+        r_in[1] += vin
+        r_in[2] += inv_input
+        r_fb[1] += vout
+        r_fb[2] += inv_input
+
+        u1[1] += vout
+        u1[2] += inv_input
+        u1[3] += gnd
+        u1[4] += gnd
+        u1[8] += vcc
+
+        sch_path = tmp_path / "multiunit_placement.kicad_sch"
+        generate_schematic(
+            file_=str(sch_path),
+            flatness=1.0,
+            retries=1,
+            seed=1,
+        )
+
+        sexp = Sexp(sch_path.read_text())
+        instances = _symbol_instances(sexp)
+        lm358_by_unit = {
+            inst["unit"]: inst
+            for inst in instances
+            if inst["lib_id"].endswith(":LM358")
+        }
+        assert 1 in lm358_by_unit
+        assert 3 in lm358_by_unit
+
+        for unit in (1, 3):
+            inst = lm358_by_unit[unit]
+            assert abs(inst["y"]) >= 1.0
+    finally:
+        skidl.config.pickle_dir = orig_pickle_dir
+
+
 def test_kicad9_pin_orientation_mapping(tmp_path):
     orig_pickle_dir = _setup_kicad9_libs(tmp_path)
     kicad9_gen = None

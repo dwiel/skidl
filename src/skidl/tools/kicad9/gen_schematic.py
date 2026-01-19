@@ -505,6 +505,18 @@ def pin_label_to_sexp(pin, tx):
     return label_list
 
 
+def _get_part_attr(part, attr, default=""):
+    parent = getattr(part, "parent", None)
+    if parent is not None:
+        parent_value = getattr(parent, attr, None)
+        if parent_value not in (None, ""):
+            return parent_value
+    value = getattr(part, attr, None)
+    if value in (None, ""):
+        return default
+    return value
+
+
 def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
     """Convert a SKiDL part to a KiCad 9 symbol s-expression as nested list.
 
@@ -565,6 +577,13 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
 
     unit_num = getattr(part, "num", 1)
 
+    parent_ref = getattr(getattr(part, "parent", None), "ref", None)
+    symbol_ref = parent_ref or part.ref
+    part_value = _get_part_attr(part, "value")
+    part_footprint = _get_part_attr(part, "footprint", "")
+    part_datasheet = _get_part_attr(part, "datasheet", "")
+    part_description = _get_part_attr(part, "description", "")
+
     # Create symbol as nested list
     symbol_list = [
         "symbol",
@@ -577,27 +596,27 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
         ["dnp", "no"],
         ["uuid", symbol_uuid],
         # Reference property
-        ["property", "Reference", part.ref,
+        ["property", "Reference", symbol_ref,
             ["at", pos_x, _round_mm(pos_y - 2.54), 0],
             ["effects", ["font", ["size", 1.27, 1.27]]]
         ],
         # Value property
-        ["property", "Value", str(part.value) if part.value else part.name,
+        ["property", "Value", str(part_value) if part_value else part.name,
             ["at", pos_x, _round_mm(pos_y + 2.54), 0],
             ["effects", ["font", ["size", 1.27, 1.27]]]
         ],
         # Footprint property (hidden)
-        ["property", "Footprint", getattr(part, 'footprint', ''),
+        ["property", "Footprint", part_footprint,
             ["at", pos_x, pos_y, 0],
             ["effects", ["font", ["size", 1.27, 1.27]], ["hide"]]
         ],
         # Datasheet property (hidden)
-        ["property", "Datasheet", getattr(part, 'datasheet', '') or "",
+        ["property", "Datasheet", part_datasheet or "",
             ["at", pos_x, pos_y, 0],
             ["effects", ["font", ["size", 1.27, 1.27]], ["hide"]]
         ],
         # Description property (hidden)
-        ["property", "Description", getattr(part, 'description', '') or "",
+        ["property", "Description", part_description or "",
             ["at", pos_x, pos_y, 0],
             ["effects", ["font", ["size", 1.27, 1.27]], ["hide"]]
         ]
@@ -657,7 +676,7 @@ def part_to_symbol_sexp(part, tx, main_sheet_uuid, sheet_uuids=None):
         ["instances",
             ["project", "SKiDL-Generated",
                 ["path", instance_path,
-                    ["reference", part.ref],
+                    ["reference", symbol_ref],
                     ["unit", unit_num]
                 ]
             ]
@@ -938,6 +957,44 @@ def build_node_map(node, path="", node_map=None):
     return node_map
 
 
+def _unit_has_connections(unit):
+    from skidl.net import NCNet
+
+    pins = list(unit)
+    if not pins:
+        return False
+    unit_num = getattr(unit, "num", None)
+    if unit_num is not None:
+        unit_pins = [pin for pin in pins if getattr(pin, "unit", unit_num) == unit_num]
+        if unit_pins:
+            pins = unit_pins
+    for pin in pins:
+        net = getattr(pin, "net", None)
+        if net is None or isinstance(net, NCNet):
+            continue
+        return True
+    return False
+
+
+def _is_used_part(part):
+    from skidl.part import PartUnit
+
+    if isinstance(part, PartUnit):
+        return _unit_has_connections(part)
+    return True
+
+
+def _parts_for_node(node_map, node_path, fallback_parts):
+    if node_map:
+        node = node_map.get(node_path)
+        if node:
+            parts = [
+                part for part in node.parts if not isinstance(part, NetTerminal)
+            ]
+            return [part for part in parts if _is_used_part(part)]
+    return [part for part in fallback_parts if _is_used_part(part)]
+
+
 def get_all_hierarchy_levels(hierarchy_groups):
     """Extract all unique hierarchy levels from the grouped parts.
 
@@ -1080,7 +1137,9 @@ def create_subcircuit_schematic_with_child_sheets(parts_group, current_path, tit
     unique_lib_parts = {}  # Map lib_id -> part (to avoid duplicates)
     symbol_parts = []  # Store parts and their data for later processing
 
-    for i, part in enumerate(parts_group):
+    parts_list = _parts_for_node(node_map, current_path, parts_group)
+
+    for i, part in enumerate(parts_list):
         if not hasattr(part, "tx"):
             grid_x = (i % 5) * 25.4 * mils_per_mm  # 5 parts per row, 1 inch spacing
             grid_y = (i // 5) * 12.7 * mils_per_mm  # 0.5 inch row spacing
@@ -1155,7 +1214,7 @@ def create_subcircuit_schematic_with_child_sheets(parts_group, current_path, tit
     if child_levels:
         # Add hierarchical sheet symbols for child levels
         # Find a good position for child sheets (after any existing content)
-        sheet_y = 50.0 + len(parts_group) * 12.7  # Position below parts
+        sheet_y = 50.0 + len(parts_list) * 12.7  # Position below parts
 
         for i, (child_name, child_path) in enumerate(child_levels):
             # Create sheet symbol for child
@@ -1208,13 +1267,13 @@ def create_main_schematic_sexp(circuit, title, hierarchy_groups, top_name, node_
 
     # Collect lib_symbols needed for root level parts
     unique_lib_parts = {}
-    if "" in hierarchy_groups:
-        for part in hierarchy_groups[""]:
-            lib_name = os.path.splitext(part.lib.filename)[0] if hasattr(part.lib, 'filename') and part.lib.filename else "Device"
-            part_name = part.name or "Unknown"
-            lib_id = f"{lib_name}:{part_name}"
-            if lib_id not in unique_lib_parts:
-                unique_lib_parts[lib_id] = part
+    root_parts = _parts_for_node(node_map, "", hierarchy_groups.get("", []))
+    for part in root_parts:
+        lib_name = os.path.splitext(part.lib.filename)[0] if hasattr(part.lib, 'filename') and part.lib.filename else "Device"
+        part_name = part.name or "Unknown"
+        lib_id = f"{lib_name}:{part_name}"
+        if lib_id not in unique_lib_parts:
+            unique_lib_parts[lib_id] = part
 
     # Create lib_symbols section
     lib_symbols_list = ["lib_symbols"]
@@ -1240,17 +1299,15 @@ def create_main_schematic_sexp(circuit, title, hierarchy_groups, top_name, node_
     ]
 
     # Add root level parts (if any) to main schematic
-    if "" in hierarchy_groups:
-        root_parts = hierarchy_groups[""]
-        for i, part in enumerate(root_parts):
-            if not hasattr(part, "tx"):
-                grid_x = (i % 5) * 25.4 * mils_per_mm
-                grid_y = (i // 5) * 12.7 * mils_per_mm
-                part.tx = Tx().move(Point(grid_x, grid_y))
+    for i, part in enumerate(root_parts):
+        if not hasattr(part, "tx"):
+            grid_x = (i % 5) * 25.4 * mils_per_mm
+            grid_y = (i // 5) * 12.7 * mils_per_mm
+            part.tx = Tx().move(Point(grid_x, grid_y))
 
-            symbol_sexp = part_to_symbol_sexp(part, sheet_tx, main_sheet_uuid, sheet_uuids)
-            if symbol_sexp:
-                schematic_list.append(symbol_sexp)
+        symbol_sexp = part_to_symbol_sexp(part, sheet_tx, main_sheet_uuid, sheet_uuids)
+        if symbol_sexp:
+            schematic_list.append(symbol_sexp)
 
     if node_map:
         node = node_map.get("")
